@@ -232,6 +232,9 @@ void SpiMaster8Bit::giveSemaphore ( void ) {
 	if ( this->s ) {
 		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 		xSemaphoreGiveFromISR ( this->s, &xHigherPriorityTaskWoken);
+		if(xHigherPriorityTaskWoken == pdTRUE){
+			taskYIELD();
+		}
 	}
 }
 
