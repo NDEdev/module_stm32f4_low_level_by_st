@@ -119,3 +119,27 @@ private:
 
 	TIM_HandleTypeDef				tim;
 };
+
+struct timEncoderCfg {
+	TIM_TypeDef		*tim;	// Сущность таймера
+	uint32_t 		period;	// Потолок инкрементирования после которого счётчик сбросится в 0 и продолжить свою работу
+	uint32_t		countCfg;
+};
+
+
+class TimEncoder : public TimEncoderBase{
+public:
+	TimEncoder(const timEncoderCfg* const _cfg); // cfg - указатель на структуру или на массив структур
+
+	BASE_RESULT		reinit							( uint32_t numberCfg = 0 );
+
+	BASE_RESULT		on								( void );
+	void			off								( void );
+
+	uint32_t		getEncoderCounts			( void );
+
+private:
+	TIM_HandleTypeDef				tim;
+
+	const timEncoderCfg* const 		cfg;
+};

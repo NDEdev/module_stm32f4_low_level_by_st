@@ -246,3 +246,61 @@ void TimInterrupt::off ( void ) {
 void TimInterrupt::clearInterruptFlag ( void ) {
 	HAL_TIM_IRQHandler( &this->tim );
 }
+
+//**********************************************************************
+// tim_encoder
+//**********************************************************************
+
+TimEncoder::TimEncoder(const timEncoderCfg* const _cfg) : cfg(_cfg){
+
+}
+
+BASE_RESULT TimEncoder::reinit(uint32_t numberCfg){
+	BASE_RESULT rv = BASE_RESULT::OK;
+
+	if ( numberCfg >= this->cfg->countCfg )
+			return BASE_RESULT::INPUT_VALUE_ERROR;
+
+	clkTimInit( this->cfg->tim );
+
+	tim.Instance 				= this->cfg[numberCfg].tim;
+	tim.Init.ClockDivision		= TIM_CLOCKDIVISION_DIV4; // вроде не влияет не на что
+	tim.Init.CounterMode		= TIM_COUNTERMODE_UP;
+	tim.Init.Period				= this->cfg[numberCfg].period;
+	tim.Init.Prescaler			= 0; // не влияет не на что
+	tim.Init.RepetitionCounter	= 0; // не влияет не на что
+
+	TIM_Encoder_InitTypeDef sCfg;
+	sCfg.EncoderMode = TIM_ENCODERMODE_TI12;
+	sCfg.IC1Polarity = TIM_ICPOLARITY_RISING;
+	sCfg.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+	sCfg.IC1Prescaler = TIM_ICPSC_DIV1;
+	sCfg.IC1Filter = 0;
+	sCfg.IC2Polarity = TIM_ICPOLARITY_RISING;
+	sCfg.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+	sCfg.IC2Prescaler = TIM_ICPSC_DIV1;
+	sCfg.IC2Filter = 0;
+
+	if(HAL_TIM_Encoder_Init(&this->tim, &sCfg) != HAL_OK)
+		rv = BASE_RESULT::INPUT_VALUE_ERROR;
+
+	return rv;
+}
+
+BASE_RESULT TimEncoder::on(void){
+	BASE_RESULT rv = BASE_RESULT::OK;
+
+	if(HAL_TIM_Encoder_Start(&this->tim, TIM_CHANNEL_ALL) != HAL_OK)
+		rv = BASE_RESULT::ERROR_INIT;
+
+	return rv;
+}
+
+void TimEncoder::off(void){
+	HAL_TIM_Encoder_Stop(&this->tim, TIM_CHANNEL_ALL);
+}
+
+uint32_t	TimEncoder::getEncoderCounts (void){
+	return this->tim.Instance->CNT;
+}
+
