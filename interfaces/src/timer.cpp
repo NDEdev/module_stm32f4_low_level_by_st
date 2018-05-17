@@ -1,4 +1,5 @@
 #include "timer.h"
+#include "port_base.h"
 
 // Включаем тактирование SPI.
 static void clkTimInit ( TIM_TypeDef* tim ) {
@@ -55,6 +56,67 @@ static void clkTimInit ( TIM_TypeDef* tim ) {
 		case	TIM16_BASE:		__HAL_RCC_TIM16_CLK_ENABLE();		break;
 #endif
 	};
+}
+
+
+uint32_t getTimBusFreq ( TIM_TypeDef* tim ) {
+	switch ( ( uint32_t )tim ) {
+#ifdef TIM1
+		case TIM1_BASE: return HAL_RCC_GetPCLK2Freq();
+#endif
+
+#ifdef TIM2
+		case TIM2_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM3
+		case TIM3_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM4
+		case TIM4_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM5
+		case TIM5_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM6
+		case TIM6_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM7
+		case TIM7_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM8
+		case TIM8_BASE: return HAL_RCC_GetPCLK2Freq();
+#endif
+
+#ifdef TIM9
+		case TIM9_BASE: return HAL_RCC_GetPCLK2Freq();
+#endif
+
+#ifdef TIM10
+		case TIM10_BASE: return HAL_RCC_GetPCLK2Freq();
+#endif
+
+#ifdef TIM11
+		case TIM11_BASE: return HAL_RCC_GetPCLK2Freq();
+#endif
+
+#ifdef TIM12
+		case TIM12_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM13
+		case TIM13_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+
+#ifdef TIM14
+		case TIM14_BASE: return HAL_RCC_GetPCLK1Freq();
+#endif
+	}
 }
 
 /*!
@@ -302,5 +364,273 @@ void TimEncoder::off(void){
 
 uint32_t	TimEncoder::getEncoderCounts (void){
 	return this->tim.Instance->CNT;
+}
+
+
+
+TimCapture::TimCapture( const timCaptureCfg* const cfg, const uint32_t countCfg ) :
+		cfg( cfg ), countCfg( countCfg ) {
+
+	this->tim.Instance						= this->cfg->tim;
+}
+
+bool TimCapture::reinit ( uint32_t numberCfg ) {
+	if ( numberCfg >= this->countCfg ) return false;
+
+	this->nowCfg = numberCfg;
+
+	clkTimInit( this->tim.Instance );
+
+	this->tim.Init.Prescaler			= this->cfg[ numberCfg ].prescaler;
+	this->tim.Init.Period				= 0xFFFF;
+
+	/// Получаем период одного тика.
+	uint32_t fTimer = getTimBusFreq( this->tim.Instance ) * 2;
+	this->tickPeriod = 1 / (	static_cast< float >( fTimer ) /
+								static_cast< float >( this->cfg[ numberCfg ].prescaler + 1 ) );
+
+	HAL_StatusTypeDef halResult;
+	halResult = HAL_TIM_Base_Init( &this->tim );
+	if ( halResult != HAL_StatusTypeDef::HAL_OK ) return false;
+
+	TIM_ClockConfigTypeDef clockSourceCfg;
+	clockSourceCfg.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	halResult = HAL_TIM_ConfigClockSource( &this->tim, &clockSourceCfg );
+	if ( halResult != HAL_StatusTypeDef::HAL_OK ) return false;
+
+	halResult = HAL_TIM_IC_Init( &this->tim );
+	if ( halResult != HAL_StatusTypeDef::HAL_OK ) return false;
+
+	TIM_MasterConfigTypeDef sMasterConfig;
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	halResult = HAL_TIMEx_MasterConfigSynchronization( &this->tim, &sMasterConfig );
+	if ( halResult != HAL_StatusTypeDef::HAL_OK ) return false;
+
+	const static TIM_IC_InitTypeDef channelCfg = {
+			.ICPolarity				=	TIM_ICPOLARITY_FALLING,
+			.ICSelection			=	TIM_ICSELECTION_DIRECTTI,
+			.ICPrescaler			=	TIM_ICPSC_DIV1,
+			.ICFilter				=	0xF
+	};
+
+	/// Настраиваем каналы захвата.
+	for ( uint32_t channelCapture = 0; channelCapture < 4; channelCapture++ ) {
+		HAL_TIM_IC_ConfigChannel( &this->tim, ( TIM_IC_InitTypeDef* )&channelCfg,
+								  this->channelHalName[ channelCapture ] );
+	}
+
+	/*
+	 * Обращение к флагам через Bit Banding.
+	 */
+	uint32_t channelCaptureBit = 1;
+	for ( uint32_t channelCapture = 0; channelCapture < 4; channelCapture++ ) {
+		this->captureFlag[ channelCapture ] = getBitWordAddr( ( void* )&this->tim.Instance->SR, channelCaptureBit );
+		channelCaptureBit++;
+	}
+
+	// Для более удобной вычитки данных из регистров в прерывании.
+	this->captureData[ 0 ] = ( uint32_t* )&this->tim.Instance->CCR1;
+	this->captureData[ 1 ] = ( uint32_t* )&this->tim.Instance->CCR2;
+	this->captureData[ 2 ] = ( uint32_t* )&this->tim.Instance->CCR3;
+	this->captureData[ 3 ] = ( uint32_t* )&this->tim.Instance->CCR4;
+
+	/// Флаг переполнения.
+	this->updateFlag = getBitWordAddr( ( void* )&this->tim.Instance->SR, 0 );
+
+	/// Начальная инициализация таймера.
+	uint32_t channelCaptureMskEn = ( TIM_CCER_CC1E << TIM_CHANNEL_1 ) |
+								   ( TIM_CCER_CC1E << TIM_CHANNEL_2 ) |
+								   ( TIM_CCER_CC1E << TIM_CHANNEL_3 ) |
+								   ( TIM_CCER_CC1E << TIM_CHANNEL_4 );
+
+	this->tim.Instance->CCER |= channelCaptureMskEn;
+	__HAL_TIM_MOE_ENABLE( &this->tim );
+
+	/// Прерывания по захвату и переполнению.
+	__HAL_TIM_ENABLE_IT( &this->tim, TIM_IT_UPDATE | TIM_IT_CC1 | TIM_IT_CC2 | TIM_IT_CC3 | TIM_IT_CC4 );
+}
+
+bool TimCapture::on	( void ) {
+	__HAL_TIM_ENABLE( &this->tim );
+	return true;
+}
+
+bool TimCapture::off ( void ) {
+	__HAL_TIM_DISABLE( &this->tim );
+	return true;
+}
+
+bool TimCapture::getFrequency ( const uint32_t channel, float& returnFrequency ) {
+	if ( channel > 3 ) return false;
+	returnFrequency =  1 / ( this->channelControl[ channel ].periodTick * this->tickPeriod );
+	return true;
+}
+
+bool TimCapture::getStateChannel  ( const uint32_t channel ) {
+	if ( channel > 3 ) return false;
+
+	/// Если канал не заблокирован.
+	if ( this->channelControl[ channel ].flagLock == false ) {
+		return true;
+	}
+
+	/// Канал заблокирован.
+	if ( this->channelControl[ channel ].lockUpCount == 0 ) {
+		/// Несмотря на то, что мы узнали, что канал
+		/// теперь активен, мы вернем то, что он заблокирован,
+		/// поскольку факт блокировки был и не был ранее вычитан.
+		this->channelControl[ channel ].flagLock = false;
+	}
+
+	return false;
+}
+
+bool TimCapture::getFlagCaptureChannel  ( const uint32_t channel ) {
+	bool buffer = this->channelControl[ channel ].updateFlag;
+	this->channelControl[ channel ].updateFlag = false;
+	return buffer;
+}
+
+void TimCapture::timHandler ( void ) {
+	/*!
+	 * Данный флаг выставляется в true если детектировано
+	 * хотя бы одно поддерживаемое прерывание.
+	 * Если вдруг по окончании проверок он будет false,
+	 * тогда у нас не детектируемое прерывание и надо все нафиг сбросить (регистр SR)!
+	 */
+	bool flagInterrupt = false;
+
+	/// Фиксируем переполнение.
+	if ( *this->updateFlag != 0 ) {
+		*this->updateFlag = 0;
+		flagInterrupt = true;
+		for ( uint32_t captureChannel = 0; captureChannel < 4; captureChannel++ ) {
+			/// Если канал был отключен.
+			if ( this->channelControl[ captureChannel ].lockUpCount >= 1 ) {
+				this->channelControl[ captureChannel ].lockUpCount--;
+
+				/// Если время пришло, то восстанавливаем канал.
+				if ( this->channelControl[ captureChannel ].lockUpCount == 0 ) {
+					TIM_CCxChannelCmd( this->tim.Instance, this->channelHalName[ captureChannel ], TIM_CCx_ENABLE );
+				}
+			} else {					/// Если канал работает штатно.
+				/*!
+				 * Если на канале все еще присутствует частота
+				 * (количество переполнений не перевалило за
+				 * максимально дозволенный, см. ниже).
+				 */
+				if ( this->channelControl[ captureChannel ].frequencyPresent == true ) {
+					this->channelControl[ captureChannel ].countUpdate++;
+				}
+
+				/*!
+				 * Возможна ситуация, когда частота на канале пропадет.
+				 * Чтобы не получилось так, что мы считаем актуальной
+				 * частоту с момента последнего обновления -
+				 * вводим максимально возможный период между импульсами.
+				 * Если мы его достигли, то считается что период
+				 * бесконечность, а частота, соответственно 0.
+				 */
+				/// Мы достигли максимально возможного периода.
+				if ( this->channelControl[ captureChannel ].countUpdate == this->cfg->maxCountUpTimerPeriod ) {
+					/// Сообщаем, что частота на канале пропала.
+					this->channelControl[ captureChannel ].frequencyPresent	=	false;
+
+					/// Количество переполнений на этом канале теперь не актуально.
+					this->channelControl[ captureChannel ].countUpdate		=	0;
+
+					/// Делаем максимально возможный период, чтобы при пересчете в частоту у нас был 0.
+					this->channelControl[ captureChannel ].periodTick		=	0xFFFFFFFF;
+				}
+			}
+
+
+		}
+	}
+
+	/// Смотрим прерывание на всех 4-х каналах.
+	for ( uint32_t captureChannel = 0; captureChannel < 4; captureChannel++ ) {
+		if ( *this->captureFlag[ captureChannel ] == 0 ) continue;				/// Если прерывания не было.
+
+		/// Фиксируем факт захвата на канале.
+		flagInterrupt = true;
+
+		/// Фиксируем событие захвата частоты на канале.
+		this->channelControl[ captureChannel ].updateFlag = true;
+
+		/*!
+		 * Если до этого момента на канале
+		 * присутствовала стабильная частота.
+		 */
+		if ( this->channelControl[ captureChannel ].frequencyPresent == true ) {
+			/// Конечное становится начальным, все едино (с)
+			this->channelControl[ captureChannel ].startPos = this->channelControl[ captureChannel ].stopPos;
+
+			/// Забираем из таймера время завершения.
+			this->channelControl[ captureChannel ].stopPos = *this->captureData[ captureChannel ];
+
+			/// Пошел анализ частоты.
+
+			/// Тот случай, когда переполнения не произошло и точки находятся
+			/// рядом в положительном диапазоне где значение старта младше остановки.
+			if ( this->channelControl[ captureChannel ].countUpdate == 0 ) {
+				/// Защита от очень высокой частоты (помех).
+				if (	this->channelControl[ captureChannel ].stopPos -
+						this->channelControl[ captureChannel ].startPos <
+						this->cfg[ nowCfg ].minTickValue ) {
+					/// Отключаем захват с канала.
+					TIM_CCxChannelCmd( this->tim.Instance, this->channelHalName[ captureChannel ], TIM_CCx_DISABLE );
+
+					/// Указываем, на какой срок заблокировали.
+					this->channelControl[ captureChannel ].lockUpCount = this->cfg[ nowCfg ].countUpForResetChannel;
+					this->channelControl[ captureChannel ].flagLock = true;
+					continue;
+				}
+
+				/// Получаем частоту.
+				this->channelControl[ captureChannel ].periodTick = ( this->channelControl[ captureChannel ].stopPos -
+																	  this->channelControl[ captureChannel ].startPos );
+				continue;			/// С текущим каналом точно все.
+			}
+
+			/// Тот случай, когда начало перед переполнением, а конец за ним.
+			if ( this->channelControl[ captureChannel ].countUpdate == 1 ) {
+				this->channelControl[ captureChannel ].periodTick =
+						( ( 0x10000 - this->channelControl[ captureChannel ].startPos ) +
+						  this->channelControl[ captureChannel ].stopPos );
+				this->channelControl[ captureChannel ].countUpdate = 0;
+				continue;			/// С текущим каналом точно все.
+			}
+
+			/// Точно знаем, что у нас широкий импульс на минимум 1 переполнение между.
+			this->channelControl[ captureChannel ].periodTick =
+					( ( 0x10000 - this->channelControl[ captureChannel ].startPos ) +
+					  this->channelControl[ captureChannel ].stopPos +
+					  ( this->channelControl[ captureChannel ].countUpdate - 1 ) * 0x10000 );
+			this->channelControl[ captureChannel ].countUpdate = 0;
+			continue;				/// С текущим каналом точно все.
+		} else {
+			/*!
+			 * Если мы тут, то у нас еще не было захваченной
+			 * частоты и приходит первый импульс.
+			 * По одному импульсу частоту не получить и
+			 * просто фиксируем его. А частота по прежнему будет 0.
+			 */
+			this->channelControl[ captureChannel ].stopPos = *this->captureData[ captureChannel ];
+
+			/*!
+			 * Со следующего импульса у нас будет уже частота.
+			 * Или снова очередное переполнение, которое
+			 * отловит обработчик переполнений.
+			 */
+			this->channelControl[ captureChannel ].frequencyPresent = true;
+		}
+	}
+
+	/// Защита от внештатных ситуаций.
+	if ( !flagInterrupt ) {
+		this->tim.Instance->SR = 0;
+	}
 }
 
